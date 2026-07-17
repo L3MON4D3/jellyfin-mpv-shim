@@ -412,7 +412,7 @@ class PlayerManager(object):
             self.pause_ignore = True
             if self._video and reached_end:
                 has_lock = self._finished_lock.acquire(False)
-                self.put_task(self.finished_callback, has_lock)
+                self.put_task(self.finished_callback, has_lock, self._video)
 
         # Fires at the end.
         @self._player.property_observer("playback-abort")
@@ -420,7 +420,7 @@ class PlayerManager(object):
             self.pause_ignore = True
             if self._video and value and not self._video.parent.has_next:
                 has_lock = self._finished_lock.acquire(False)
-                self.put_task(self.finished_callback, has_lock)
+                self.put_task(self.finished_callback, has_lock, self._video)
 
         @self._player.property_observer("seeking")
         def handle_seeking(_name, value: bool):
@@ -886,7 +886,16 @@ class PlayerManager(object):
         return False
 
     @synchronous("_lock")
-    def finished_callback(self, has_lock: bool):
+    def finished_callback(self, has_lock: bool, ending_video=None):
+        # Bail out if the video has changed since this callback was queued
+        # (e.g. user switched to a different movie remotely while one was playing).
+        if ending_video is not None and ending_video is not self._video:
+            log.info(
+                "PlayerManager::finished_callback video changed, skipping stale callback"
+            )
+            self.pause_ignore = False
+            return
+
         if not self._video:
             self.pause_ignore = False
             return
