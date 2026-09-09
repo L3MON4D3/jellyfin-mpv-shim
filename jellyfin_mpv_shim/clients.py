@@ -381,6 +381,53 @@ class ClientManager(object):
         return True
 
     def setup_client(self, client: "JellyfinClient", server):
+        capabilities_retry_lock = threading.Lock()
+        capabilities_retry_active = False
+
+        def retry_capabilities():
+            """Register capabilities without blocking the websocket thread."""
+            nonlocal capabilities_retry_active
+            delay = 1
+            try:
+                # Jellyfin can accept websocket connections while its HTTP API
+                # still returns 503 during a lengthy startup. Keep retries
+                # bounded, and back off so a persistently broken server is not
+                # hammered indefinitely.
+                for attempt in range(30):
+                    if self.is_stopping:
+                        return
+                    current = self.clients.get(server["uuid"])
+                    if current is not None and current is not client:
+                        return  # A replacement client now owns this server.
+                    try:
+                        client.jellyfin.post_capabilities(CAPABILITIES)
+                        log.info("Posted capabilities after websocket connect")
+                        return
+                    except Exception:
+                        if attempt == 9:
+                            log.warning(
+                                "Failed to post capabilities after reconnect",
+                                exc_info=True,
+                            )
+                            return
+                        time.sleep(delay)
+                        delay = min(delay * 2, 60)
+            finally:
+                with capabilities_retry_lock:
+                    capabilities_retry_active = False
+
+        def start_capabilities_retry():
+            nonlocal capabilities_retry_active
+            with capabilities_retry_lock:
+                if capabilities_retry_active:
+                    return
+                capabilities_retry_active = True
+            threading.Thread(
+                target=retry_capabilities,
+                name="post-capabilities",
+                daemon=True,
+            ).start()
+
         def event(event_name, data):
             if event_name == "WebSocketDisconnect":
                 timeout_gen = expo(100)
@@ -398,24 +445,7 @@ class ClientManager(object):
                             break
             elif event_name == "WebSocketConnect":
                 log.info("WebSocket connected, posting capabilities")
-                # The websocket can accept connections before Jellyfin's HTTP
-                # API is ready after a server restart. Capabilities register
-                # this client as a playback target, so retry transient startup
-                # failures rather than leaving it absent until the next restart.
-                for attempt in range(6):
-                    if self.is_stopping:
-                        break
-                    try:
-                        client.jellyfin.post_capabilities(CAPABILITIES)
-                        break
-                    except Exception:
-                        if attempt == 5:
-                            log.warning(
-                                "Failed to post capabilities after reconnect",
-                                exc_info=True,
-                            )
-                        else:
-                            time.sleep(2)
+                start_capabilities_retry()
                 self.callback(client, event_name, data)
             else:
                 self.callback(client, event_name, data)
