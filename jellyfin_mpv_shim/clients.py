@@ -371,11 +371,15 @@ class ClientManager(object):
                 log.warning(
                     "Client is not actually connected. (It does not show in the client list.)"
                 )
-                # WebSocketDisconnect doesn't always happen here.
+                # WebSocketDisconnect doesn't always happen here. Silence the
+                # client before stopping it so its websocket thread cannot
+                # start a second reconnect loop, but retain the real callback
+                # to synthesize the one disconnect event that starts recovery.
+                callback = client.callback
                 client.callback = lambda *_: None
                 client.callback_ws = lambda *_: None
                 client.stop()
-                client.callback("WebSocketDisconnect", None)
+                callback("WebSocketDisconnect", None)
             return False
 
         return True
@@ -404,7 +408,7 @@ class ClientManager(object):
                         log.info("Posted capabilities after websocket connect")
                         return
                     except Exception:
-                        if attempt == 9:
+                        if attempt == 29:
                             log.warning(
                                 "Failed to post capabilities after reconnect",
                                 exc_info=True,
